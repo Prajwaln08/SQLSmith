@@ -2,7 +2,7 @@
 
 **On-premises text-to-SQL analytics copilot using small open language models**
 
-> **Status: in progress.** Baselines on the full Spider benchmark, the training dataset and the first QLoRA fine-tuning run are done. Fine-tuned model evaluation, DPO, schema linking, self-correction and optimised serving are next. See [Progress](#progress) and [Roadmap](#roadmap).
+> **Status: in progress.** Milestones A and B are done: baselines, a clean training set, and QLoRA fine-tuning of both models, scored on the full Spider dev set. Fine-tuning lifted **Qwen 1.5B from 42.5% to 59.4%** (+16.9 points) and **Qwen 7B from 73.2% to 75.1%** (+1.9 points). DPO, schema linking, self-correction and optimised serving are next. See [Progress](#progress) and [Roadmap](#roadmap).
 
 ## The problem
 
@@ -50,14 +50,48 @@ The planned FastAPI service will let a BI tool, a chat app or an internal portal
 | A.1 Full benchmark | All 1,034 Spider dev questions for both models | Done |
 | B.1 SFT dataset | Clean, database-disjoint training and validation sets | Done |
 | B.2 QLoRA 1.5B | First fine-tuning run (250 steps) | Done |
-| B.3 QLoRA 7B | Fine-tuning on a 16 GB T4 | In progress (smoke test done) |
-| B.4 Fine-tuned evaluation | Base vs fine-tuned on the full Spider dev set | Pipeline built, results pending |
+| B.3 QLoRA 7B | Fine-tuning on a 16 GB T4 (200 steps) | Done |
+| B.4 Fine-tuned evaluation | Base vs fine-tuned on the full Spider dev set | Done |
 | C. DPO | Preference tuning on correct vs incorrect SQL | Planned |
 | D. Schema linking + self-correction | Inference-time improvements | Planned |
 | E. Serving and cost | vLLM, AWQ / GGUF, latency and cost per 1K queries | Planned |
 | F. BIRD + healthcare set | Harder benchmark and a small synthetic healthcare schema | Planned |
 
 ## Results so far
+
+### Headline: fine-tuned vs base, official Spider 1.0 dev set (1,034 questions)
+
+Same frozen prompt, greedy decoding, 4-bit inference on one T4, and the same pinned official evaluator for all four runs. The re-scored baselines match Notebook 06 exactly, so the comparison is like for like.
+
+| Model | Base | QLoRA fine-tuned | Change |
+| --- | :---: | :---: | :---: |
+| Qwen2.5-Coder-1.5B-Instruct | 42.5% | **59.4%** | **+16.9 points** |
+| Qwen2.5-Coder-7B-Instruct | 73.2% | **75.1%** | **+1.9 points** |
+
+**By difficulty**
+
+| Model | Easy (248) | Medium (446) | Hard (174) | Extra hard (166) |
+| --- | :---: | :---: | :---: | :---: |
+| 1.5B base | 65.3% | 40.8% | 25.9% | 30.1% |
+| 1.5B fine-tuned | **83.1%** | **61.2%** | **42.5%** | **36.7%** |
+| 7B base | 88.3% | 78.0% | 65.5% | 45.8% |
+| 7B fine-tuned | **89.5%** | **80.5%** | 64.4% | **50.6%** |
+
+**Speed (generation on one T4, adapter attached but not merged)**
+
+| Model | Mean latency | p95 latency | Tokens / second |
+| --- | :---: | :---: | :---: |
+| 1.5B base | 1.81 s | 3.29 s | 20.2 |
+| 1.5B fine-tuned | 3.61 s | 7.58 s | 9.3 |
+| 7B base | 1.90 s | 3.67 s | 15.0 |
+| 7B fine-tuned | 3.91 s | 8.47 s | 8.1 |
+
+**What this shows**
+
+- **The small model gains the most.** Fine-tuning closed **55% of the gap** between the 1.5B and 7B base models (16.9 of 30.7 points), with gains at every difficulty level.
+- **The 7B model gains less.** It improved on easy, medium and extra-hard questions, but dropped 1.1 points on hard ones. Its run was also lighter (LoRA rank 8, 200 steps, 1,024-token cap) to fit a T4, so the two gains are not a like-for-like comparison of model size.
+- **Latency roughly doubled** with the LoRA adapter running unmerged on the 4-bit base model. Merging the adapter and serving with vLLM (Milestone E) are meant to recover this.
+- No empty predictions in any of the four runs. A paired significance test on per-question results has not been run yet, so the +1.9-point 7B gain should be read with care.
 
 ### Baseline: official Spider 1.0 dev set (1,034 questions)
 
@@ -100,25 +134,40 @@ These findings shaped the roadmap: invalid columns point to **schema linking**, 
 
 Checks pass for no database overlap between training, validation and dev, so the model is never scored on a database it trained on.
 
-### QLoRA run: Qwen2.5-Coder-1.5B
+### QLoRA training runs
 
-- 4-bit NF4 base model with LoRA adapters: **18.5M trainable parameters (1.18% of 1.56B)**.
-- Loss on the SQL answer tokens only, so the model is not rewarded for repeating the question or schema.
-- 250 steps in about 26 minutes on a T4, peak 3.8 GiB GPU memory.
-- Training loss 0.191, validation loss 0.202.
+Both runs use a 4-bit NF4 base model with LoRA adapters on all attention and MLP projections, the same database-disjoint training set from Notebook 07, and loss on the SQL answer tokens only (so the model is not rewarded for repeating the question or schema). Long examples are dropped, never truncated.
 
-Loss is not accuracy. The execution accuracy of the fine-tuned model will be reported once Notebook 10 finishes.
+| Setting | Qwen 1.5B (Notebook 08) | Qwen 7B (Notebook 09) |
+| --- | :---: | :---: |
+| LoRA rank / alpha | 16 / 32 | 8 / 16 |
+| Trainable parameters | **18.5M (1.18%)** | **20.2M (0.26%)** |
+| Max sequence length | 1,536 tokens | 1,024 tokens |
+| Training examples kept | 7,849 (82 too long) | 7,849 (82 too long) |
+| Learning rate | 2e-4, cosine | 1e-4, cosine |
+| Effective batch size | 8 | 16 |
+| Steps (share of one epoch) | 250 (0.25) | 200 (0.41) |
+| Training time on a T4 | about 26 minutes | about 1 hour 54 minutes |
+| Peak GPU memory | 3.8 GiB | 10.3 GiB |
+| Final training loss | 0.191 | 0.135 |
+| Validation loss | 0.202 (128 examples) | 0.104 (58 examples, 14 of 15 databases) |
+
+The 7B settings were reduced on purpose to fit a 16 GB T4 (gradient checkpointing, micro-batch 1). 7B validation loss settled at 0.104 to 0.105 from step 150 to step 200 with no upward trend, so the run showed no sign of over-fitting within this budget. Loss is not accuracy: the execution scores above come from Notebook 10.
 
 ## Evaluation rules
 
 - **Execution accuracy, not string match.** A query counts as correct if it returns the right result on the official test-suite databases.
 - **No leakage.** The Spider dev set is never used for training or for choosing checkpoints, and gold SQL is never shown in the prompt.
 - **Same prompt and settings** for every model, so differences come from the model, not the setup.
-- **Honest uncertainty.** Small samples are reported with Wilson 95% intervals. Paired significance tests will only be claimed once per-question results exist for both models.
+- **Frozen baselines.** Fine-tuned models are scored with the same prompt, decoding, evaluator commit and test-suite databases as the baselines, and the baselines are re-scored in the same run as a check.
+- **Honest uncertainty.** Small samples are reported with Wilson 95% intervals. Significance is only claimed after a paired test on per-question results.
 
 ## Roadmap
 
-- [ ] Finish the 7B QLoRA run and score both fine-tuned models on the full Spider dev set
+- [x] Finish the 7B QLoRA run and score both fine-tuned models on the full Spider dev set
+- [ ] Paired significance test (McNemar) on per-question results, base vs fine-tuned
+- [ ] Error analysis of the fine-tuned models, including the 7B drop on hard questions
+- [ ] Longer or higher-rank 7B run on a larger GPU, to match the 1.5B settings
 - [ ] Ablation table: base, +SFT, +DPO, +schema linking, +self-correction
 - [ ] Error taxonomy before and after each step (wrong join, wrong aggregation, hallucinated column)
 - [ ] Serve with vLLM; compare AWQ and GGUF quantisation on speed, memory and accuracy
@@ -140,8 +189,8 @@ Loss is not accuracy. The execution accuracy of the fine-tuned model will be rep
 | 06 | [Full_Spider_Benchmark](notebooks/06_Full_Spider_Benchmark.ipynb) | Both models on all 1,034 dev questions |
 | 07 | [SFT_Dataset_Preparation](notebooks/07_SFT_Dataset_Preparation.ipynb) | Clean, database-disjoint training data |
 | 08 | [QLoRA_SFT_1_5B](notebooks/08_QLoRA_SFT_1_5B.ipynb) | QLoRA fine-tuning of the 1.5B model |
-| 09 | [QLoRA_SFT_7B](notebooks/09_QLoRA_SFT_7B.ipynb) | QLoRA fine-tuning of the 7B model (in progress) |
-| 10 | [SFT_Comparative_Evaluation](notebooks/10_SFT_Comparative_Evaluation.ipynb) | Base vs fine-tuned evaluation (in progress) |
+| 09 | [QLoRA_SFT_7B](notebooks/09_QLoRA_SFT_7B.ipynb) | QLoRA fine-tuning of the 7B model (200 steps) |
+| 10 | [SFT_Comparative_Evaluation](notebooks/10_SFT_Comparative_Evaluation.ipynb) | Base vs fine-tuned, official evaluation of all four runs |
 
 ## Tech stack
 
@@ -171,7 +220,9 @@ Raw dataset files are not stored in this repository. The notebooks download them
 ## Limitations
 
 - Results so far are on Spider only; BIRD and real business schemas are harder.
-- Spider dev scores are a development benchmark, not a production accuracy figure.
+- Spider dev scores are a development benchmark, not a production accuracy figure. Spider dev was never used for training or checkpoint choice, but it is not a hidden test set.
+- The 1.5B and 7B runs used different training settings, so their gains do not isolate the effect of model size.
+- Fine-tuned latency is measured with an unmerged adapter; it is not yet an optimised serving number.
 - Some GPU operations are not bit-for-bit reproducible across Colab sessions, even with fixed decoding.
 
 ## Author
