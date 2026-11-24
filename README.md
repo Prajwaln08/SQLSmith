@@ -3,6 +3,8 @@
 **On-premises text-to-SQL analytics copilot using small open language models**
 
 > **Status: in progress.** Milestones A and B are done: baselines, a clean training set, and QLoRA fine-tuning of both models, scored on the full Spider dev set. Fine-tuning lifted **Qwen 1.5B from 42.5% to 59.4%** (+16.9 points) and **Qwen 7B from 73.2% to 75.1%** (+1.9 points). DPO, schema linking, self-correction and optimised serving are next. See [Progress](#progress) and [Roadmap](#roadmap).
+>
+> *Last updated: 25 November 2026.*
 
 ## The problem
 
